@@ -355,9 +355,8 @@ def xauusd_analysis():
     timeframes = {
         "daily": analyze_timeframe("1day", "Daily"),
         "h4": analyze_timeframe("4h", "4H"),
-        "h1": analyze_timeframe("1h", "1H"),
-        "m15": analyze_timeframe("15min", "15m"),
-        "m5": analyze_timeframe("5min", "5m")
+        "h1": analyze_timeframe("1h", "1H")      
+        
     }
 
     snapshot = {
@@ -386,11 +385,13 @@ def xauusd_analysis():
 
     decision_data = build_decision(snapshot)
 
-    current_price = None
-    if timeframes["m5"].get("ok"):
-        current_price = timeframes["m5"].get("current_price")
-    elif timeframes["m15"].get("ok"):
-        current_price = timeframes["m15"].get("current_price")
+current_price = None
+if timeframes["h1"].get("ok"):
+    current_price = timeframes["h1"].get("current_price")
+elif timeframes["h4"].get("ok"):
+    current_price = timeframes["h4"].get("current_price")
+elif timeframes["daily"].get("ok"):
+    current_price = timeframes["daily"].get("current_price")
 
     return {
         "symbol": "XAUUSD",
