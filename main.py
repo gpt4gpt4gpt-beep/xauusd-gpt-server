@@ -23,7 +23,16 @@ def get_api_key():
     return os.getenv("TWELVE_DATA_API_KEY")
 
 
-def fetch_twelve_data(symbol="XAU/USD", interval="15min", outputsize=120):
+def safe_float(value, default=0.0):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def fetch_twelve_data(symbol="XAU/USD", interval="1h", outputsize=120):
     api_key = get_api_key()
 
     if not api_key:
@@ -49,7 +58,7 @@ def fetch_twelve_data(symbol="XAU/USD", interval="15min", outputsize=120):
             raw = response.read().decode("utf-8")
             data = json.loads(raw)
 
-        if "status" in data and data.get("status") == "error":
+        if data.get("status") == "error":
             return {
                 "ok": False,
                 "error": data.get("message", "Twelve Data API error"),
@@ -62,11 +71,11 @@ def fetch_twelve_data(symbol="XAU/USD", interval="15min", outputsize=120):
         for item in reversed(values):
             candles.append({
                 "time": item.get("datetime"),
-                "open": float(item.get("open")),
-                "high": float(item.get("high")),
-                "low": float(item.get("low")),
-                "close": float(item.get("close")),
-                "volume": float(item.get("volume", 0) or 0)
+                "open": safe_float(item.get("open")),
+                "high": safe_float(item.get("high")),
+                "low": safe_float(item.get("low")),
+                "close": safe_float(item.get("close")),
+                "volume": safe_float(item.get("volume", 0))
             })
 
         return {
@@ -141,7 +150,12 @@ def macd(values):
 
     macd_value = round(ema_12 - ema_26, 3)
 
-    bias = "bullish" if macd_value > 0 else "bearish" if macd_value < 0 else "neutral"
+    if macd_value > 0:
+        bias = "bullish"
+    elif macd_value < 0:
+        bias = "bearish"
+    else:
+        bias = "neutral"
 
     return {
         "macd": macd_value,
@@ -183,12 +197,9 @@ def support_resistance(candles):
     lows = [c["low"] for c in recent]
     highs = [c["high"] for c in recent]
 
-    support = round(min(lows), 3)
-    resistance = round(max(highs), 3)
-
     return {
-        "support": support,
-        "resistance": resistance
+        "support": round(min(lows), 3),
+        "resistance": round(max(highs), 3)
     }
 
 
@@ -203,7 +214,7 @@ def analyze_timeframe(interval, label):
             "error": result.get("error")
         }
 
-    candles = result["candles"]
+    candles = result.get("candles", [])
 
     if len(candles) < 30:
         return {
@@ -328,8 +339,9 @@ async def tradingview_webhook(request: Request):
     try:
         data = await request.json()
     except Exception:
+        body = await request.body()
         data = {
-            "raw": await request.body()
+            "raw": body.decode("utf-8", errors="ignore")
         }
 
     latest_alert = {
@@ -355,8 +367,7 @@ def xauusd_analysis():
     timeframes = {
         "daily": analyze_timeframe("1day", "Daily"),
         "h4": analyze_timeframe("4h", "4H"),
-        "h1": analyze_timeframe("1h", "1H")      
-        
+        "h1": analyze_timeframe("1h", "1H")
     }
 
     snapshot = {
@@ -379,19 +390,23 @@ def xauusd_analysis():
             "decision": "WAIT",
             "signal_type": "Wait",
             "confidence": 0,
+            "current_price": None,
+            "buy_confirmations": 0,
+            "sell_confirmations": 0,
             "message": "Market data returned, but not enough valid timeframes for a reliable signal.",
+            "risk_note": "Educational analysis only. Do not trade without confirmation and risk management.",
             "snapshot": snapshot
         }
 
     decision_data = build_decision(snapshot)
 
-current_price = None
-if timeframes["h1"].get("ok"):
-    current_price = timeframes["h1"].get("current_price")
-elif timeframes["h4"].get("ok"):
-    current_price = timeframes["h4"].get("current_price")
-elif timeframes["daily"].get("ok"):
-    current_price = timeframes["daily"].get("current_price")
+    current_price = None
+    if timeframes["h1"].get("ok"):
+        current_price = timeframes["h1"].get("current_price")
+    elif timeframes["h4"].get("ok"):
+        current_price = timeframes["h4"].get("current_price")
+    elif timeframes["daily"].get("ok"):
+        current_price = timeframes["daily"].get("current_price")
 
     return {
         "symbol": "XAUUSD",
@@ -402,5 +417,6 @@ elif timeframes["daily"].get("ok"):
         "current_price": current_price,
         "buy_confirmations": decision_data["buy_confirmations"],
         "sell_confirmations": decision_data["sell_confirmations"],
-       "risk_note": "Educational analysis only. Do not trade without confirmation and risk management.",
+        "risk_note": "Educational analysis only. Do not trade without confirmation and risk management.",
+        "snapshot": snapshot
     }
