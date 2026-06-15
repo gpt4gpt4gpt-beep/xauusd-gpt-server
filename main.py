@@ -402,6 +402,5 @@ elif timeframes["daily"].get("ok"):
         "current_price": current_price,
         "buy_confirmations": decision_data["buy_confirmations"],
         "sell_confirmations": decision_data["sell_confirmations"],
-        "risk_note": "Educational analysis only. Do not trade without confirmation and risk management.",
-        "snapshot": snapshot
+       "risk_note": "Educational analysis only. Do not trade without confirmation and risk management.",
     }
