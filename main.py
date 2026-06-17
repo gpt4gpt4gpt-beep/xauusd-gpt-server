@@ -5,6 +5,8 @@ import os
 import json
 import urllib.parse
 import urllib.request
+import time
+import copy
 
 app = FastAPI(title="XAUUSD GPT Server")
 
@@ -17,6 +19,10 @@ app.add_middleware(
 )
 
 latest_alert = {}
+
+# Simple in-memory cache.
+# Note: On serverless hosting, cache persists only while the function instance stays warm.
+market_cache = {}
 
 
 def get_api_key():
@@ -32,13 +38,70 @@ def safe_float(value, default=0.0):
         return default
 
 
+def get_cache_ttl(interval):
+    ttl_map = {
+        "1day": 1800,   # 30 minutes
+        "4h": 900,      # 15 minutes
+        "1h": 300,      # 5 minutes
+        "15min": 60,    # 1 minute
+        "5min": 30      # 30 seconds
+    }
+    return ttl_map.get(interval, 120)
+
+
+def cache_key(symbol, interval, outputsize):
+    return f"{symbol}:{interval}:{outputsize}"
+
+
+def get_from_cache(symbol, interval, outputsize):
+    key = cache_key(symbol, interval, outputsize)
+    item = market_cache.get(key)
+
+    if not item:
+        return None
+
+    now = time.time()
+    ttl = get_cache_ttl(interval)
+    age = now - item["saved_at"]
+
+    if age > ttl:
+        return None
+
+    cached_data = copy.deepcopy(item["data"])
+    cached_data["cache"] = {
+        "hit": True,
+        "age_seconds": round(age, 2),
+        "ttl_seconds": ttl,
+        "cache_key": key
+    }
+    return cached_data
+
+
+def save_to_cache(symbol, interval, outputsize, data):
+    if not data.get("ok"):
+        return
+
+    key = cache_key(symbol, interval, outputsize)
+    market_cache[key] = {
+        "saved_at": time.time(),
+        "data": copy.deepcopy(data)
+    }
+
+
 def fetch_twelve_data(symbol="XAU/USD", interval="1h", outputsize=120):
+    cached = get_from_cache(symbol, interval, outputsize)
+    if cached:
+        return cached
+
     api_key = get_api_key()
 
     if not api_key:
         return {
             "ok": False,
-            "error": "TWELVE_DATA_API_KEY is missing"
+            "error": "TWELVE_DATA_API_KEY is missing",
+            "cache": {
+                "hit": False
+            }
         }
 
     base_url = "https://api.twelvedata.com/time_series"
@@ -62,7 +125,10 @@ def fetch_twelve_data(symbol="XAU/USD", interval="1h", outputsize=120):
             return {
                 "ok": False,
                 "error": data.get("message", "Twelve Data API error"),
-                "raw": data
+                "raw": data,
+                "cache": {
+                    "hit": False
+                }
             }
 
         values = data.get("values", [])
@@ -78,18 +144,29 @@ def fetch_twelve_data(symbol="XAU/USD", interval="1h", outputsize=120):
                 "volume": safe_float(item.get("volume", 0))
             })
 
-        return {
+        result = {
             "ok": True,
             "symbol": symbol,
             "interval": interval,
             "candles": candles,
-            "meta": data.get("meta", {})
+            "meta": data.get("meta", {}),
+            "cache": {
+                "hit": False,
+                "ttl_seconds": get_cache_ttl(interval),
+                "cache_key": cache_key(symbol, interval, outputsize)
+            }
         }
+
+        save_to_cache(symbol, interval, outputsize, result)
+        return result
 
     except Exception as e:
         return {
             "ok": False,
-            "error": str(e)
+            "error": str(e),
+            "cache": {
+                "hit": False
+            }
         }
 
 
@@ -428,7 +505,8 @@ def analyze_timeframe(interval, label):
             "label": label,
             "interval": interval,
             "ok": False,
-            "error": result.get("error")
+            "error": result.get("error"),
+            "cache": result.get("cache", {})
         }
 
     candles = result.get("candles", [])
@@ -438,7 +516,8 @@ def analyze_timeframe(interval, label):
             "label": label,
             "interval": interval,
             "ok": False,
-            "error": "Not enough candle data"
+            "error": "Not enough candle data",
+            "cache": result.get("cache", {})
         }
 
     closes = [c["close"] for c in candles]
@@ -483,7 +562,8 @@ def analyze_timeframe(interval, label):
         "bollinger_bands": current_bb,
         "market_structure": current_structure,
         "support": sr["support"],
-        "resistance": sr["resistance"]
+        "resistance": sr["resistance"],
+        "cache": result.get("cache", {})
     }
 
 
@@ -559,7 +639,7 @@ def home():
     return {
         "status": "running",
         "message": "XAUUSD GPT Server is live",
-        "version": "adx_bollinger_market_structure_v1"
+        "version": "cache_v1_adx_bollinger_market_structure"
     }
 
 
@@ -567,7 +647,42 @@ def home():
 def health():
     return {
         "status": "ok",
-        "time": datetime.now(timezone.utc).isoformat()
+        "time": datetime.now(timezone.utc).isoformat(),
+        "cache_items": len(market_cache)
+    }
+
+
+@app.get("/cache/status")
+def cache_status():
+    now = time.time()
+    items = []
+
+    for key, item in market_cache.items():
+        data = item.get("data", {})
+        interval = data.get("interval", "unknown")
+        ttl = get_cache_ttl(interval)
+        age = now - item["saved_at"]
+
+        items.append({
+            "cache_key": key,
+            "interval": interval,
+            "age_seconds": round(age, 2),
+            "ttl_seconds": ttl,
+            "valid": age <= ttl
+        })
+
+    return {
+        "cache_items": len(market_cache),
+        "items": items
+    }
+
+
+@app.post("/cache/clear")
+def cache_clear():
+    market_cache.clear()
+    return {
+        "status": "cleared",
+        "cache_items": len(market_cache)
     }
 
 
@@ -614,7 +729,10 @@ def xauusd_analysis():
         "data_source": "Twelve Data API",
         "server_time": datetime.now(timezone.utc).isoformat(),
         "timeframes": timeframes,
-        "latest_alert": latest_alert
+        "latest_alert": latest_alert,
+        "cache_summary": {
+            "cache_items": len(market_cache)
+        }
     }
 
     valid_timeframes = [
