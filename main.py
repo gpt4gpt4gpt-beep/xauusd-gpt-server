@@ -27,7 +27,7 @@ def get_api_key():
 
 def get_supabase_url():
     url = os.getenv("SUPABASE_URL", "")
-    return url.rstrip("/")
+    return url.strip().rstrip("/")
 
 
 def get_supabase_key():
@@ -658,7 +658,7 @@ def home():
     return {
         "status": "running",
         "message": "XAUUSD GPT Server is live",
-        "version": "supabase_cache_v1_adx_bollinger_market_structure",
+        "version": "supabase_cache_v2_scalp_endpoint",
         "supabase_cache_enabled": supabase_enabled(),
     }
 
@@ -756,3 +756,241 @@ def xauusd_analysis():
         "risk_note": "Educational analysis only. Do not trade without confirmation and risk management.",
         "snapshot": snapshot,
     }
+
+# =========================
+# Scalp analysis: 1H + 15m + 5m
+# =========================
+
+def add_score(reason_list, label, side, points, reason):
+    reason_list.append({
+        "timeframe": label,
+        "side": side,
+        "points": points,
+        "reason": reason
+    })
+
+
+def build_scalp_decision(snapshot):
+    timeframes = snapshot.get("timeframes", {})
+    h1 = timeframes.get("h1", {})
+    m15 = timeframes.get("m15", {})
+    m5 = timeframes.get("m5", {})
+
+    buy_score = 0
+    sell_score = 0
+    reasons = []
+
+    weights = {
+        "h1": 2,
+        "m15": 2,
+        "m5": 1
+    }
+
+    for key, tf in timeframes.items():
+        if not tf.get("ok"):
+            continue
+
+        label = tf.get("label", key)
+        weight = weights.get(key, 1)
+
+        bias = tf.get("bias")
+        if bias == "bullish":
+            buy_score += 2 * weight
+            add_score(reasons, label, "buy", 2 * weight, "bullish EMA/bias alignment")
+        elif bias == "bearish":
+            sell_score += 2 * weight
+            add_score(reasons, label, "sell", 2 * weight, "bearish EMA/bias alignment")
+
+        rsi_value = tf.get("rsi")
+        if rsi_value is not None:
+            if rsi_value > 55:
+                buy_score += 1 * weight
+                add_score(reasons, label, "buy", 1 * weight, "RSI above 55")
+            elif rsi_value < 45:
+                sell_score += 1 * weight
+                add_score(reasons, label, "sell", 1 * weight, "RSI below 45")
+
+        macd_bias = tf.get("macd", {}).get("bias")
+        if macd_bias == "bullish":
+            buy_score += 1 * weight
+            add_score(reasons, label, "buy", 1 * weight, "MACD bullish")
+        elif macd_bias == "bearish":
+            sell_score += 1 * weight
+            add_score(reasons, label, "sell", 1 * weight, "MACD bearish")
+
+        adx_data = tf.get("adx", {})
+        if adx_data.get("trend_strength") in ["moderate", "strong"]:
+            if adx_data.get("direction") == "bullish":
+                buy_score += 1 * weight
+                add_score(reasons, label, "buy", 1 * weight, "ADX supports bullish direction")
+            elif adx_data.get("direction") == "bearish":
+                sell_score += 1 * weight
+                add_score(reasons, label, "sell", 1 * weight, "ADX supports bearish direction")
+
+        structure = tf.get("market_structure", {}).get("structure")
+        if structure == "bullish_structure":
+            buy_score += 1 * weight
+            add_score(reasons, label, "buy", 1 * weight, "bullish market structure")
+        elif structure == "bearish_structure":
+            sell_score += 1 * weight
+            add_score(reasons, label, "sell", 1 * weight, "bearish market structure")
+
+        bb_position = tf.get("bollinger_bands", {}).get("position")
+        if bb_position in ["above_middle_band", "above_upper_band"]:
+            buy_score += 1 * weight
+            add_score(reasons, label, "buy", 1 * weight, "Bollinger position above middle/upper band")
+        elif bb_position in ["below_middle_band", "below_lower_band"]:
+            sell_score += 1 * weight
+            add_score(reasons, label, "sell", 1 * weight, "Bollinger position below middle/lower band")
+
+    decision = "WAIT"
+    signal_type = "Scalp Wait"
+    confidence = min(90, max(buy_score, sell_score) * 4)
+
+    h1_direction = h1.get("bias", "neutral") if h1.get("ok") else "unknown"
+    m15_direction = m15.get("bias", "neutral") if m15.get("ok") else "unknown"
+    m5_direction = m5.get("bias", "neutral") if m5.get("ok") else "unknown"
+
+    # Conservative scalp rules:
+    # 1H is filter, 15m is confirmation, 5m is execution.
+    if (
+        buy_score >= 14
+        and buy_score >= sell_score + 5
+        and h1_direction != "bearish"
+        and m15_direction != "bearish"
+    ):
+        decision = "BUY"
+        signal_type = "Scalp Buy"
+        confidence = min(90, buy_score * 4)
+    elif (
+        sell_score >= 14
+        and sell_score >= buy_score + 5
+        and h1_direction != "bullish"
+        and m15_direction != "bullish"
+    ):
+        decision = "SELL"
+        signal_type = "Scalp Sell"
+        confidence = min(90, sell_score * 4)
+
+    if abs(buy_score - sell_score) <= 4:
+        decision = "WAIT"
+        signal_type = "Scalp Wait - Mixed Signals"
+        confidence = min(confidence, 50)
+
+    key_levels = {
+        "h1_support": h1.get("support") if h1.get("ok") else None,
+        "h1_resistance": h1.get("resistance") if h1.get("ok") else None,
+        "m15_support": m15.get("support") if m15.get("ok") else None,
+        "m15_resistance": m15.get("resistance") if m15.get("ok") else None,
+        "m5_support": m5.get("support") if m5.get("ok") else None,
+        "m5_resistance": m5.get("resistance") if m5.get("ok") else None,
+    }
+
+    current_price = None
+    if m5.get("ok"):
+        current_price = m5.get("current_price")
+    elif m15.get("ok"):
+        current_price = m15.get("current_price")
+    elif h1.get("ok"):
+        current_price = h1.get("current_price")
+
+    plan = {
+        "execution_timeframe": "5m",
+        "confirmation_timeframe": "15m",
+        "trend_filter_timeframe": "1H",
+        "entry_zone": None,
+        "stop_loss": None,
+        "take_profit_1": None,
+        "take_profit_2": None,
+        "invalidation_condition": None,
+        "note": "No trade levels are provided unless the scalp decision is BUY or SELL."
+    }
+
+    if decision == "BUY":
+        plan["entry_zone"] = "Use 5m execution only after price holds above nearby 5m/15m support or breaks resistance with confirmation."
+        plan["stop_loss"] = "Below nearest confirmed 5m/15m swing low or ATR-based invalidation."
+        plan["take_profit_1"] = "Nearest 5m/15m resistance."
+        plan["take_profit_2"] = "Next 1H resistance if momentum continues."
+        plan["invalidation_condition"] = "5m closes back below the trigger zone or 15m momentum turns bearish."
+        plan["note"] = "Educational scalp idea only. Do not enter without live confirmation and risk management."
+    elif decision == "SELL":
+        plan["entry_zone"] = "Use 5m execution only after price rejects nearby resistance or breaks support with confirmation."
+        plan["stop_loss"] = "Above nearest confirmed 5m/15m swing high or ATR-based invalidation."
+        plan["take_profit_1"] = "Nearest 5m/15m support."
+        plan["take_profit_2"] = "Next 1H support if momentum continues."
+        plan["invalidation_condition"] = "5m closes back above the trigger zone or 15m momentum turns bullish."
+        plan["note"] = "Educational scalp idea only. Do not enter without live confirmation and risk management."
+
+    return {
+        "decision": decision,
+        "signal_type": signal_type,
+        "confidence": confidence,
+        "buy_score": buy_score,
+        "sell_score": sell_score,
+        "current_price": current_price,
+        "key_levels": key_levels,
+        "scalp_plan": plan,
+        "scoring_reasons": reasons[:30]
+    }
+
+
+@app.get("/xauusd/scalp")
+def xauusd_scalp():
+    timeframes = {
+        "h1": analyze_timeframe("1h", "1H"),
+        "m15": analyze_timeframe("15min", "15m"),
+        "m5": analyze_timeframe("5min", "5m"),
+    }
+
+    snapshot = {
+        "symbol": "XAUUSD",
+        "analysis_type": "scalp",
+        "data_source": "Twelve Data API",
+        "server_time": utc_now_iso(),
+        "timeframes": timeframes,
+        "latest_alert": latest_alert,
+        "cache_summary": {"type": "supabase", "enabled": supabase_enabled()},
+        "method": {
+            "h1": "trend filter",
+            "m15": "setup confirmation",
+            "m5": "execution timing"
+        }
+    }
+
+    valid_timeframes = [tf for tf in timeframes.values() if tf.get("ok")]
+    if len(valid_timeframes) < 3:
+        return {
+            "symbol": "XAUUSD",
+            "analysis_type": "scalp",
+            "data_source": "Twelve Data API",
+            "decision": "WAIT",
+            "signal_type": "Scalp Wait",
+            "confidence": 0,
+            "current_price": None,
+            "message": "Not enough valid scalp timeframes for a reliable scalp signal.",
+            "risk_note": "Educational analysis only. Do not trade without confirmation and risk management.",
+            "snapshot": snapshot,
+        }
+
+    scalp_data = build_scalp_decision(snapshot)
+
+    return {
+        "symbol": "XAUUSD",
+        "analysis_type": "scalp",
+        "data_source": "Twelve Data API",
+        "decision": scalp_data["decision"],
+        "signal_type": scalp_data["signal_type"],
+        "confidence": scalp_data["confidence"],
+        "current_price": scalp_data["current_price"],
+        "buy_score": scalp_data["buy_score"],
+        "sell_score": scalp_data["sell_score"],
+        "execution_timeframe": "5m",
+        "confirmation_timeframe": "15m",
+        "trend_filter_timeframe": "1H",
+        "key_levels": scalp_data["key_levels"],
+        "scalp_plan": scalp_data["scalp_plan"],
+        "scoring_reasons": scalp_data["scoring_reasons"],
+        "risk_note": "Educational analysis only. Do not trade without confirmation and risk management.",
+        "snapshot": snapshot,
+    }
+
